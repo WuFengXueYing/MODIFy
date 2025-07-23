@@ -1,2 +1,2 @@
-# MFDESys
-MFDESys: Multi-modal Feature Fusion and Diffusion Enhancement for Microservice Anomaly Diagnosis.The code will be available later.
+# FuseDiag
+FuseDiag: A Multi-Modal Anomaly Diagnosis Framework with Diffusion-Enhanced Adaptive Fusion in Microservices
