@@ -2,37 +2,16 @@ from torch.utils.data import Dataset, DataLoader
 import torch
 import dgl
 class chunkDataset(Dataset): #[node_num, T, else]
-    """
-           初始化函数，用于构建图数据结构并存储相关数据。
-
-           Args:
-               chunks (dict): 包含多个数据块的字典，每个数据块包含日志、指标、追踪信息以及对应的错误标签。
-               node_num (int): 图中节点的数量。
-               edges (tuple): 图的边信息，包含两个列表，分别表示边的源节点和目标节点。
-           """
     def __init__(self, chunks, node_num, edges):
-        # 存储图数据及其对应的错误标签
         self.data = []
-        # 用于将索引映射到数据块ID的字典
         self.idx2id = {}
-        # 遍历chunks字典，构建图数据结构并存储相关信息
         for idx, chunk_id in enumerate(chunks.keys()):
-            # 将索引映射到数据块ID
             self.idx2id[idx] = chunk_id
             chunk = chunks[chunk_id]
-            # 使用DGL库创建有向图，并设置节点特征，edges[0] 和 edges[1] 分别表示图中的源节点和目标节点。0->1
             graph = dgl.graph((edges[0], edges[1]), num_nodes=node_num)
-            # 设置节点的日志特征，graph.ndata 是一个字典，用于存储图中节点的特征数据。每个键对应一个特征名称，值是一个张量（tensor），表示所有节点在该特征上的值
-            # torch.FloatTensor 是 PyTorch 中的一个函数，用于将输入数据转换为浮点型张量（tensor）。
             graph.ndata["logs"] = torch.FloatTensor(chunk["logs"])
-            # 设置节点的指标特征
             graph.ndata["metrics"] = torch.FloatTensor(chunk["metrics"])
-            # 设置节点的追踪特征
             graph.ndata["traces"] = torch.FloatTensor(chunk["traces"])
-            # 将图及其对应的错误节点存储到data列表中
-            # 如果 chunk["culprit"] 为 -1，表示该数据块中没有故障节点。
-            # 否则，chunk["culprit"] 表示故障节点的索引（从 0 开始）
-            # 这样做的目的是将每个数据块的图结构和对应的标签组合在一起，形成一个完整的数据项，方便后续的数据加载和处理。
             self.data.append((graph, chunk["culprit"]))
 
     def __len__(self):
@@ -125,13 +104,13 @@ def run(evaluation_epoch=10):
     train_chunks, test_chunks = load_chunks(data_dir)
     train_data = chunkDataset(train_chunks, node_num, edges)
     test_data = chunkDataset(test_chunks, node_num, edges)
-    graph_example = train_data[0][0]  # 获取第一个图样本
+    graph_example = train_data[0][0]
     feature_keys = ['logs', 'metrics', 'traces']
     total_node_feat_dim = sum([
-        graph_example.ndata[key].view(graph_example.ndata[key].size(0), -1).size(1)  # 展平后计算维度
+        graph_example.ndata[key].view(graph_example.ndata[key].size(0), -1).size(1)
         for key in feature_keys
     ])
-    params["node_feat_dim"] = total_node_feat_dim  # 设置总特征维度
+    params["node_feat_dim"] = total_node_feat_dim
 
 
     train_dl = DataLoader(train_data, batch_size=params["batch_size"], shuffle=True, collate_fn=collate, pin_memory=True)

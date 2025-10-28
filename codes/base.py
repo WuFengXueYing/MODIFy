@@ -41,17 +41,6 @@ class BaseModel(nn.Module):
 
 
     def evaluate(self, test_loader, datatype="Test"):
-        """
-          评估模型在测试集上的性能。
-
-
-          参数:
-          - test_loader: 数据加载器，用于加载测试数据。
-          - datatype: 字符串，表示数据类型，默认为"Test"。
-          返回值:
-          - eval_results: 字典，包含模型在测试集上的评估结果，包括F1分数、召回率、准确率、HR@k和NDCG@k等指标。
-          """
-
         self.model.eval()
         hrs, ndcgs = np.zeros(5), np.zeros(5)
         TN, TP, FP, FN = 0, 0, 0,0
@@ -186,7 +175,7 @@ class BaseModel(nn.Module):
 
                 test_results, embedding, labels = self.evaluate(test_loader, datatype="Test")
                 perplexity = 30
-                tsne = TSNE(n_components=2, random_state=10, perplexity=perplexity,learning_rate='auto', n_iter=2000)  # perplexity 可调参数
+                tsne = TSNE(n_components=2, random_state=10, perplexity=perplexity,learning_rate='auto', n_iter=2000)
                 tsne_result = tsne.fit_transform(embedding)
                 self.visualize(tsne_result, epoch, labels, perplexity)
 
@@ -247,39 +236,14 @@ class BaseModel(nn.Module):
             filename = f"{save_dir}/tsne_final.pdf"
 
         plt.savefig(filename, format="pdf", bbox_inches="tight", dpi=300)
-        plt.close()  # 关闭图像防止重复显示
+        plt.close()
 
     def load_model(self, model_save_file=""):
-        """
-            加载预训练的模型权重。
-
-            该函数从指定的文件中加载模型的权重，并将其加载到当前模型的实例中。
-            使用 `torch.load` 函数从文件中加载模型的状态字典，并通过 `map_location` 参数确保权重被加载到正确的设备上。
-
-            参数:
-            - model_save_file (str): 保存模型权重的文件路径。如果未提供路径，则默认为空字符串。
-
-            返回值:
-            - 无
-            """
         self.model.load_state_dict(torch.load(model_save_file, map_location=self.device))
 
     def save_model(self, state, file=None):
-        """
-           保存模型的状态到指定文件。
-
-           参数:
-           - state: 要保存的模型状态，通常是一个包含模型参数和优化器状态的字典。
-           - file: 保存文件的路径。如果未提供，则默认保存到 `self.model_save_dir` 目录下的 "model.ckpt" 文件。
-
-           返回值:
-           无返回值。
-           """
-        # 如果未提供文件路径，则使用默认路径
         if file is None: file = os.path.join(self.model_save_dir, "model.ckpt")
         try:
-            # 尝试使用旧的序列化方式保存模型状态
             torch.save(state, file, _use_new_zipfile_serialization=False)
         except:
-            # 如果旧的序列化方式失败，则使用默认的序列化方式保存
             torch.save(state, file)
