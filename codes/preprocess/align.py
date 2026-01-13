@@ -1,6 +1,14 @@
+# align.py: process & align multi-source data (logs/traces/metrics) into chunks,
+# then split into train/test sets.
+#
+# IMPORTANT (fix temporal leakage):
+# - We split on the *raw time axis* first (per record run), then only keep windows
+#   fully on one side. No interval in train shares any raw timestamp with any
+#   interval in test.
 
 import string
 import random
+import os
 import pickle
 from collections import defaultdict
 
@@ -28,6 +36,7 @@ def _compute_split_time(start: int, end: int, chunk_lenth: int, test_ratio: floa
     """Compute a time-based split point (per run) and clamp to keep both sides non-empty."""
     assert 0.0 < test_ratio < 1.0
     duration = end - start + 1
+    # initial: split by time length
     train_duration = int((1.0 - test_ratio) * duration)
     split_time = start + train_duration  # train uses [start, split_time-1], test uses [split_time, end]
 
@@ -50,6 +59,27 @@ def _build_intervals_inclusive(t_start: int, t_end_inclusive: int, chunk_lenth: 
     return [(s, s + chunk_lenth - 1) for s in range(t_start, last_s + 1)]
 
 
+# def _annotate_intervals(intervals, faults, threshold: int):
+#     """Assign labels per interval based on fault overlap."""
+#     labels = [-1] * len(intervals)
+#     for chunk_idx, (s, e) in enumerate(intervals):
+#         for (fs, fe, culprit) in faults:
+#             overlap = 0
+#             # overlap length between [s,e] and [fs,fe]
+#             if s >= fs and s <= fe:
+#                 overlap = fe - s + 1
+#             elif e >= fs and e <= fe:
+#                 overlap = e - fs + 1
+#             elif fs >= s and fs <= e:
+#                 overlap = e - fs + 1
+#             elif fe >= s and fe <= e:
+#                 overlap = fe - s + 1
+#
+#             if overlap >= threshold:
+#                 labels[chunk_idx] = culprit
+#             if overlap > 0:
+#                 break
+#     return labels
 def _annotate_intervals(intervals, faults, threshold: int):
     labels = [-1] * len(intervals)
     for chunk_idx, (s, e) in enumerate(intervals):
@@ -60,9 +90,8 @@ def _annotate_intervals(intervals, faults, threshold: int):
 
             if overlap >= threshold:
                 labels[chunk_idx] = culprit
-                break
+                break  # 只在满足阈值时才停止找
     return labels
-
 
 # Generate intervals and labels, with time-based split (per records idx)
 def get_basic(info, idx, name, chunk_lenth=10, threshold=1, test_ratio=0.3, **kwargs):
@@ -75,10 +104,12 @@ def get_basic(info, idx, name, chunk_lenth=10, threshold=1, test_ratio=0.3, **kw
 
     start, end = records["start"], records["end"]
 
-
+    # --- time-based split (per run) ---
     split_time = _compute_split_time(start, end, chunk_lenth, test_ratio)
 
+    # Train uses ONLY timestamps < split_time
     train_intervals = _build_intervals_inclusive(start, split_time - 1, chunk_lenth)
+    # Test uses ONLY timestamps >= split_time
     test_intervals = _build_intervals_inclusive(split_time, end, chunk_lenth)
 
     intervals = train_intervals + test_intervals
@@ -162,7 +193,7 @@ def get_chunks(info, idx, name, chunk_lenth=10, test_ratio=0.3, **kwargs):
     print("*** Aligning multi-source data...")
     chunks = defaultdict(dict)
 
-
+    # IMPORTANT: don't shadow the function argument `idx` (run id)
     for interval_i in range(len(intervals)):
         chunk_id = get_chunkid()
         chunks[chunk_id]["traces"] = traces["latency"][interval_i]  # [node_num, chunk_lenth, 2]
@@ -221,8 +252,10 @@ def get_all_chunks(name, chunk_lenth=10, test_ratio=0.3, **kwargs):
 
 
 def split_chunks(name, test_ratio=0.3, concat=False, **kwargs):
-    """
-    Split chunks into train/test.
+    """Split chunks into train/test.
+
+    New behavior (no leakage): if chunks contain the key `split`, we trust it and
+    split deterministically by time. Otherwise, we fall back to the old random split.
     """
     chunks = {}
 
@@ -253,14 +286,36 @@ def split_chunks(name, test_ratio=0.3, concat=False, **kwargs):
 
     print("\n *** Spliting chunks into training and testing sets...")
 
-    train_chunks = {k: v for k, v in chunks.items() if v.get("split") == "train"}
-    test_chunks = {k: v for k, v in chunks.items() if v.get("split") == "test"}
-    dropped = len(chunks) - len(train_chunks) - len(test_chunks)
-    if dropped > 0:
-        print(f"[WARN] {dropped} chunks have invalid split flag and were ignored.")
+    # --- preferred: time-based split already stored per chunk ---
+    has_split_flag = len(chunks) > 0 and all(isinstance(v, dict) and ("split" in v) for v in chunks.values())
 
-    train_num, test_num, chunk_num = len(train_chunks), len(test_chunks), len(train_chunks) + len(test_chunks)
-    print(f"# time-based split: train={train_num}, test={test_num}, total_used={chunk_num}")
+    if has_split_flag:
+
+        train_chunks = {k: v for k, v in chunks.items() if v.get("split") == "train"}
+        test_chunks = {k: v for k, v in chunks.items() if v.get("split") == "test"}
+        dropped = len(chunks) - len(train_chunks) - len(test_chunks)
+        if dropped > 0:
+            print(f"[WARN] {dropped} chunks have invalid split flag and were ignored.")
+
+        train_num, test_num, chunk_num = len(train_chunks), len(test_chunks), len(train_chunks) + len(test_chunks)
+        print(f"# time-based split (no leakage): train={train_num}, test={test_num}, total_used={chunk_num}")
+
+    else:
+        # --- fallback: old random split (may leak for sliding windows) ---
+        print("[WARN] chunks do not contain 'split' metadata. Falling back to RANDOM split (may leak).")
+        chunk_num = len(chunks)
+        chunk_hashids = np.array(list(chunks.keys()))
+        chunk_idx = list(range(chunk_num))
+
+        train_num = int((1 - test_ratio) * chunk_num)
+        test_num = int(test_ratio * chunk_num)
+        np.random.shuffle(chunk_idx)
+
+        train_idx = chunk_idx[:train_num]
+        test_idx = chunk_idx[train_num:train_num + test_num]
+
+        train_chunks = {k: chunks[k] for k in chunk_hashids[train_idx]}
+        test_chunks = {k: chunks[k] for k in chunk_hashids[test_idx]}
 
     aim = name[0] if concat else name
     with open(os.path.join("../chunks", aim, "chunk_train.pkl"), "wb") as fw:
@@ -280,11 +335,9 @@ def split_chunks(name, test_ratio=0.3, concat=False, **kwargs):
     test_labels = [v.get('culprit', -1) != -1 for _, v in test_chunks.items()]
 
     if len(train_labels) > 0:
-        print("# train chunks: {}/{} ({:.4f}%)".format(sum(train_labels), len(train_labels),
-                                                       100 * (sum(train_labels) / len(train_labels))))
+        print("# train chunks: {}/{} ({:.4f}%)".format(sum(train_labels), len(train_labels), 100 * (sum(train_labels) / len(train_labels))))
     if len(test_labels) > 0:
-        print("# test chunks: {}/{} ({:.4f}%)".format(sum(test_labels), len(test_labels),
-                                                      100 * (sum(test_labels) / len(test_labels))))
+        print("# test chunks: {}/{} ({:.4f}%)".format(sum(test_labels), len(test_labels), 100 * (sum(test_labels) / len(test_labels))))
 
     for label in sorted(list(label_count.keys())):
         if label > -1:
@@ -299,9 +352,10 @@ parser.add_argument("--delete_all", action="store_true")
 parser.add_argument("--delete", action="store_true", help="just remove the final chunks and retain pre-processed data")
 parser.add_argument("--threshold", default=1, type=int)
 parser.add_argument("--chunk_lenth", default=6, type=int)
-parser.add_argument("--test_ratio", default=0.1, type=float)
+parser.add_argument("--test_ratio", default=0.3, type=float)
 parser.add_argument("--name", required=True, help="The system name")
 params = vars(parser.parse_args())
+
 
 if "__main__" == __name__:
     aim_dir = os.path.join("../chunks", params['name'])
@@ -311,7 +365,6 @@ if "__main__" == __name__:
         flag = (_input.lower() == 'yes')
         if flag and os.path.exists(aim_dir) and len(aim_dir) > 2:
             import shutil
-
             shutil.rmtree(aim_dir)
         else:
             print("Thank you for thinking twice!")
